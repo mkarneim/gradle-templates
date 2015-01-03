@@ -18,7 +18,6 @@ apply plugin: 'eclipse'
 apply plugin: 'eclipse-wtp'
 
 group = 'net.karneim'
-archivesBaseName = "hackaton"
 version = '1.0.0-SNAPSHOT'
 sourceCompatibility = 1.7
 
