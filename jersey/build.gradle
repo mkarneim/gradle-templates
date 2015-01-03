@@ -1,0 +1,189 @@
+
+task wrapper(type: Wrapper) { gradleVersion = '2.0' }
+
+buildscript {
+  repositories {
+    jcenter() // needed for tomcat-base plugin
+  }
+
+  dependencies {
+    classpath 'org.gradle.api.plugins:gradle-tomcat-plugin:1.2.4'
+  }
+}
+
+apply plugin: 'java'
+apply plugin: 'war'
+apply plugin: 'tomcat-base'
+apply plugin: 'eclipse'
+apply plugin: 'eclipse-wtp'
+
+group = 'net.karneim'
+archivesBaseName = "hackaton"
+version = '1.0.0-SNAPSHOT'
+sourceCompatibility = 1.7
+
+ext {
+  extraEclipseBinFolder = 'bin-ext'
+  integrationTestSrcFolder = 'src/integration-test/java'
+  allTestSrcFolders = ['src/test/java', integrationTestSrcFolder]
+  eclipseAptFolder = '.apt_generated'
+  eclipseSettingsDir = file('.settings')
+  tomcatVersion = '7.0.47'
+  tomcatStopPort = 8081
+  tomcatStopKey = 'stopKey'
+  contextPath = project.name
+  deployName = project.name
+}
+
+repositories {
+  mavenCentral()
+  mavenLocal()
+}
+
+sourceSets {
+  integrationTest {
+    java {
+      srcDir file(integrationTestSrcFolder)
+      compileClasspath += main.output
+      compileClasspath += test.output
+      runtimeClasspath += main.output
+      runtimeClasspath += test.output
+    }
+  }
+}
+
+configurations {
+  codeGeneration
+  integrationTestCompile.extendsFrom testCompile
+  integrationTestRuntime.extendsFrom testRuntime
+}
+
+dependencies {
+  codeGeneration 'net.karneim:pojobuilder:3.+'
+  compile 'javax.ws.rs:javax.ws.rs-api:2.0'
+  compile 'org.glassfish.jersey.containers:jersey-container-servlet:2.13'
+  compile 'org.glassfish.jersey.core:jersey-client:2.13'
+  compile 'net.karneim:pojobuilder:3.+:annotations'
+  compile 'joda-time:joda-time:2.4'
+  providedCompile 'javax.servlet:servlet-api:2.5'
+
+  testCompile "junit:junit:4.11"
+  testCompile 'org.assertj:assertj-core:1.7.0'
+  testCompile 'org.mockito:mockito-core:1.10.8'
+  testCompile 'junit:junit:4.12'
+
+  tomcat("org.apache.tomcat.embed:tomcat-embed-core:${tomcatVersion}")
+  tomcat("org.apache.tomcat.embed:tomcat-embed-logging-juli:${tomcatVersion}")
+  tomcat("org.apache.tomcat.embed:tomcat-embed-jasper:${tomcatVersion}") {
+    exclude group: 'org.eclipse.jdt.core.compiler', module: 'ecj'
+  }
+}
+compileJava.classpath += configurations.codeGeneration
+compileTestJava.classpath += configurations.codeGeneration
+
+tasks.withType(JavaCompile) {
+  options.compilerArgs += ['-implicit:none','-Xlint:unchecked']
+}
+
+task tomcatRun(type: org.gradle.api.plugins.tomcat.tasks.TomcatRun) {
+  stopPort = tomcatStopPort
+  stopKey = tomcatStopKey
+  daemon = true
+}
+
+task tomcatStop(type: org.gradle.api.plugins.tomcat.tasks.TomcatStop) {
+  stopPort = tomcatStopPort
+  stopKey = tomcatStopKey
+}
+
+task integrationTest(type:Test, group:'verification', dependsOn: [test, war, tomcatRun]){
+  description = "Run integration tests (located in src/integration-test/...)."
+  testClassesDir = project.sourceSets.integrationTest.output.classesDir
+  classpath = project.sourceSets.integrationTest.runtimeClasspath
+  finalizedBy tomcatStop
+}
+check.dependsOn integrationTest
+
+task testReport(type: TestReport, group:'verification') {
+  destinationDir = file("$buildDir/reports/allTests")
+  reportOn test
+  reportOn integrationTest
+}
+check.dependsOn testReport
+
+eclipse {
+  jdt.file.withProperties {
+    it['org.eclipse.jdt.core.compiler.processAnnotations'] = 'enabled'
+  }
+}
+
+tasks.eclipseJdt {
+  doFirst {
+    def aptPrefs =
+      file("${eclipseSettingsDir}/org.eclipse.jdt.apt.core.prefs")
+    aptPrefs.parentFile.mkdirs()
+
+    aptPrefs.text = """\
+    eclipse.preferences.version=1
+    org.eclipse.jdt.apt.aptEnabled=true
+    org.eclipse.jdt.apt.genSrcDir=${eclipseAptFolder}
+    org.eclipse.jdt.apt.reconcileEnabled=true
+    """.stripIndent()
+
+    file('.factorypath').withWriter {
+      new groovy.xml.MarkupBuilder(it).'factorypath' {
+        project.configurations.codeGeneration.each { dep->
+          factorypathentry(
+            kind:'EXTJAR',
+            id:dep.absolutePath,
+            enabled:true,
+            runInBatchMode:false
+          )
+        }
+      }
+    }
+  }
+}
+
+// The following part of this script contains several fixes of the 'eclipse' plugin.
+eclipse {
+  classpath {
+    file {
+      // Change the order of classpathentries;
+      // Otherwise no sources for 3rd party jars are shown
+      withXml { xml ->
+        def node = xml.asNode()
+        node.remove( node.find { it.@path == 'org.eclipse.jst.j2ee.internal.web.container' } )
+        // WebContains must be last element
+        node.appendNode( 'classpathentry', [ kind: 'con', path: 'org.eclipse.jst.j2ee.internal.web.container', exported: 'true'])
+      }
+      // Change the 'output' folder for test sources;
+      // Otherwise compiled test code would be copied to the WEB-INF/classes folder
+      whenMerged { cp ->
+        cp.entries.removeAll { entry ->
+          entry.kind == 'src' && allTestSrcFolders.contains(entry.path)
+        }
+        allTestSrcFolders.each {
+          cp.entries.add( new org.gradle.plugins.ide.eclipse.model.SourceFolder(it, extraEclipseBinFolder))
+        }
+      }
+    }
+  }
+  wtp {
+    component {
+      contextPath = contextPath
+      deployName = deployName
+      // Remove the test sources;
+      // Otherwise the output folder of test sources would be copied to the WEB-INF/classes folder
+      sourceDirs -= sourceSets.test.java
+      sourceDirs -= sourceSets.integrationTest.java
+
+    }
+    // Make this Eclipse project a dynamic web project
+    facet {
+      facet name: 'jst.web', version: '3.0'
+      facet name: 'java', version: '1.7'
+      facet name: 'wst.jsdt.web', version: '1.0'
+    }
+  }
+}
